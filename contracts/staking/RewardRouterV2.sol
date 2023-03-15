@@ -7,10 +7,8 @@ import "../libraries/token/IERC20.sol";
 import "../libraries/token/SafeERC20.sol";
 import "../libraries/utils/ReentrancyGuard.sol";
 import "../libraries/utils/Address.sol";
-
 import "./interfaces/IRewardTracker.sol";
-import "./interfaces/IVester.sol";
-import "../tokens/interfaces/IMintable.sol";
+import "./interfaces/IAlpReferralReward.sol";
 import "../tokens/interfaces/IWETH.sol";
 import "../core/interfaces/IAlpManager.sol";
 import "../access/Governable.sol";
@@ -34,12 +32,13 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
     address public stakedAlpTracker;
     address public stakedAlpTracker2;
     address public feeAlpTracker;
+    address public alpReferralReward;
 
     address public alpManager;
 
     bool public stakedAlpEnable = true;
 
-    mapping (address => address) public pendingReceivers;
+    mapping(address => address) public pendingReceivers;
 
     event StakeAvt(address account, address token, uint256 amount);
     event UnstakeAvt(address account, address token, uint256 amount);
@@ -60,6 +59,7 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         address _feeAlpTracker,
         address _stakedAlpTracker,
         address _stakedAlpTracker2,
+        address _alpReferralReward,
         address _alpManager
     ) external onlyGov {
         require(!isInitialized, "RewardRouter: already initialized");
@@ -77,6 +77,7 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         feeAlpTracker = _feeAlpTracker;
         stakedAlpTracker = _stakedAlpTracker;
         stakedAlpTracker2 = _stakedAlpTracker2;
+        alpReferralReward = _alpReferralReward;
 
         alpManager = _alpManager;
     }
@@ -90,7 +91,10 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         IERC20(_token).safeTransfer(_account, _amount);
     }
 
-    function batchStakeAvtForAccount(address[] memory _accounts, uint256[] memory _amounts) external nonReentrant onlyGov {
+    function batchStakeAvtForAccount(
+        address[] memory _accounts,
+        uint256[] memory _amounts
+    ) external nonReentrant onlyGov {
         address _avt = avt;
         for (uint256 i = 0; i < _accounts.length; i++) {
             _stakeAvt(msg.sender, _accounts[i], _avt, _amounts[i]);
@@ -109,19 +113,31 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         _unstakeAvt(msg.sender, avt, _amount);
     }
 
-    function mintAndStakeAlp(address _token, uint256 _amount, uint256 _minUsdg, uint256 _minAlp) external nonReentrant returns (uint256) {
+    function mintAndStakeAlp(
+        address _token,
+        uint256 _amount,
+        uint256 _minUsdg,
+        uint256 _minAlp
+    ) external nonReentrant returns (uint256) {
         require(_amount > 0, "RewardRouter: invalid _amount");
 
         address account = msg.sender;
 
-        uint256 alpAmount = IAlpManager(alpManager).addLiquidityForAccount(account, account, _token, _amount, _minUsdg, _minAlp);
+        uint256 alpAmount = IAlpManager(alpManager).addLiquidityForAccount(
+            account,
+            account,
+            _token,
+            _amount,
+            _minUsdg,
+            _minAlp
+        );
         IRewardTracker(feeAlpTracker).stakeForAccount(account, account, alp, alpAmount);
 
         if (stakedAlpEnable) {
             IRewardTracker(stakedAlpTracker).stakeForAccount(account, account, feeAlpTracker, alpAmount);
             IRewardTracker(stakedAlpTracker2).stakeForAccount(account, account, stakedAlpTracker, alpAmount);
         }
-        
+
         emit StakeAlp(account, alpAmount);
 
         return alpAmount;
@@ -130,15 +146,22 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
     function mintAndStakeAlpETH(uint256 _minUsdg, uint256 _minAlp) external payable nonReentrant returns (uint256) {
         require(msg.value > 0, "RewardRouter: invalid msg.value");
 
-        IWETH(weth).deposit{value: msg.value}();
+        IWETH(weth).deposit{ value: msg.value }();
         IERC20(weth).approve(alpManager, msg.value);
 
         address account = msg.sender;
 
-        uint256 alpAmount = IAlpManager(alpManager).addLiquidityForAccount(address(this), account, weth, msg.value, _minUsdg, _minAlp);
+        uint256 alpAmount = IAlpManager(alpManager).addLiquidityForAccount(
+            address(this),
+            account,
+            weth,
+            msg.value,
+            _minUsdg,
+            _minAlp
+        );
 
         IRewardTracker(feeAlpTracker).stakeForAccount(account, account, alp, alpAmount);
-        
+
         if (stakedAlpEnable) {
             IRewardTracker(stakedAlpTracker).stakeForAccount(account, account, feeAlpTracker, alpAmount);
             IRewardTracker(stakedAlpTracker2).stakeForAccount(account, account, stakedAlpTracker, alpAmount);
@@ -149,37 +172,58 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         return alpAmount;
     }
 
-    function unstakeAndRedeemAlp(address _tokenOut, uint256 _alpAmount, uint256 _minOut, address _receiver) external nonReentrant returns (uint256) {
+    function unstakeAndRedeemAlp(
+        address _tokenOut,
+        uint256 _alpAmount,
+        uint256 _minOut,
+        address _receiver
+    ) external nonReentrant returns (uint256) {
         require(_alpAmount > 0, "RewardRouter: invalid _alpAmount");
 
         address account = msg.sender;
         uint256 stakedAlpBalance = IERC20(stakedAlpTracker2).balanceOf(account);
         if (stakedAlpBalance != 0) {
-            uint256 stakedAlpAmount = stakedAlpBalance > _alpAmount ? _alpAmount: stakedAlpBalance;
+            uint256 stakedAlpAmount = stakedAlpBalance > _alpAmount ? _alpAmount : stakedAlpBalance;
             IRewardTracker(stakedAlpTracker2).unstakeForAccount(account, stakedAlpTracker, stakedAlpAmount, account);
             IRewardTracker(stakedAlpTracker).unstakeForAccount(account, feeAlpTracker, stakedAlpAmount, account);
         }
 
         IRewardTracker(feeAlpTracker).unstakeForAccount(account, alp, _alpAmount, account);
-        uint256 amountOut = IAlpManager(alpManager).removeLiquidityForAccount(account, _tokenOut, _alpAmount, _minOut, _receiver);
+        uint256 amountOut = IAlpManager(alpManager).removeLiquidityForAccount(
+            account,
+            _tokenOut,
+            _alpAmount,
+            _minOut,
+            _receiver
+        );
 
         emit UnstakeAlp(account, _alpAmount);
 
         return amountOut;
     }
 
-    function unstakeAndRedeemAlpETH(uint256 _alpAmount, uint256 _minOut, address payable _receiver) external nonReentrant returns (uint256) {
+    function unstakeAndRedeemAlpETH(
+        uint256 _alpAmount,
+        uint256 _minOut,
+        address payable _receiver
+    ) external nonReentrant returns (uint256) {
         require(_alpAmount > 0, "RewardRouter: invalid _alpAmount");
 
         address account = msg.sender;
         uint256 stakedAlpBalance = IERC20(stakedAlpTracker2).balanceOf(account);
         if (stakedAlpBalance != 0) {
-            uint256 stakedAlpAmount = stakedAlpBalance > _alpAmount ? _alpAmount: stakedAlpBalance;
+            uint256 stakedAlpAmount = stakedAlpBalance > _alpAmount ? _alpAmount : stakedAlpBalance;
             IRewardTracker(stakedAlpTracker2).unstakeForAccount(account, stakedAlpTracker, stakedAlpAmount, account);
             IRewardTracker(stakedAlpTracker).unstakeForAccount(account, feeAlpTracker, stakedAlpAmount, account);
         }
         IRewardTracker(feeAlpTracker).unstakeForAccount(account, alp, _alpAmount, account);
-        uint256 amountOut = IAlpManager(alpManager).removeLiquidityForAccount(account, weth, _alpAmount, _minOut, address(this));
+        uint256 amountOut = IAlpManager(alpManager).removeLiquidityForAccount(
+            account,
+            weth,
+            _alpAmount,
+            _minOut,
+            address(this)
+        );
 
         IWETH(weth).withdraw(amountOut);
 
@@ -197,16 +241,20 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         IRewardTracker(feeAlpTracker).claimForAccount(account, account);
 
         IRewardTracker(stakedAvtTracker).claimForAccount(account, account);
-        IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
-        IRewardTracker(stakedAlpTracker2).claimForAccount(account, account);
+        uint256 baseAmount = IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
+        baseAmount = baseAmount.add(IRewardTracker(stakedAlpTracker2).claimForAccount(account, account));
+
+        IAlpReferralReward(alpReferralReward).increaseAlpReferral(account, baseAmount);
     }
 
     function claimAvt() external nonReentrant {
         address account = msg.sender;
 
         IRewardTracker(stakedAvtTracker).claimForAccount(account, account);
-        IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
-        IRewardTracker(stakedAlpTracker2).claimForAccount(account, account);
+        uint256 baseAmount = IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
+        baseAmount = baseAmount.add(IRewardTracker(stakedAlpTracker2).claimForAccount(account, account));
+
+        IAlpReferralReward(alpReferralReward).increaseAlpReferral(account, baseAmount);
     }
 
     function claimFees() external nonReentrant {
@@ -227,6 +275,7 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
     function handleRewards(
         bool _shouldClaimStakedAvtReward,
         bool _shouldClaimStakedAlpReward,
+        bool _shouldClaimAlpReferralReward,
         bool _shouldStakeAvt,
         bool _shouldClaimWeth,
         bool _shouldConvertWethToEth
@@ -241,6 +290,12 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
             uint256 avtAmount1 = IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
             uint256 avtAmount2 = IRewardTracker(stakedAlpTracker2).claimForAccount(account, account);
             avtAmount = avtAmount.add(avtAmount1).add(avtAmount2);
+
+            IAlpReferralReward(alpReferralReward).increaseAlpReferral(account, avtAmount);
+        }
+
+        if (_shouldClaimAlpReferralReward) {
+            avtAmount = avtAmount.add(IAlpReferralReward(alpReferralReward).claimForReferrer(account));
         }
 
         if (_shouldStakeAvt && avtAmount > 0) {
@@ -285,6 +340,7 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
         uint256 avtAmount = IRewardTracker(stakedAlpTracker).claimForAccount(_account, _account);
         avtAmount = avtAmount.add(IRewardTracker(stakedAlpTracker2).claimForAccount(_account, _account));
         if (avtAmount > 0) {
+            IAlpReferralReward(alpReferralReward).increaseAlpReferral(_account, avtAmount);
             _stakeAvt(_account, _account, avt, avtAmount);
         }
     }
