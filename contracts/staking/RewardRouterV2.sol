@@ -290,8 +290,9 @@ contract RewardRouterV2 is ReentrancyGuard, Governable {
             uint256 avtAmount1 = IRewardTracker(stakedAlpTracker).claimForAccount(account, account);
             uint256 avtAmount2 = IRewardTracker(stakedAlpTracker2).claimForAccount(account, account);
             avtAmount = avtAmount.add(avtAmount1).add(avtAmount2);
+            uint256 alpReferralRewardAmount = avtAmount1.add(avtAmount2);
 
-            IAlpReferralReward(alpReferralReward).increaseAlpReferral(account, avtAmount);
+            IAlpReferralReward(alpReferralReward).increaseAlpReferral(account, alpReferralRewardAmount);
         }
 
         if (_shouldClaimAlpReferralReward) {
